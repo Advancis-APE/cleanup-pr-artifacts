@@ -14,41 +14,38 @@ runs:
       with:
         github-token: ${{ inputs.github-token }}
         script: |
-          const { owner, repo } = context.repo;
-          const prNumber = context.payload.pull_request.number;
-          const pr = await github.rest.pulls.get({ owner, repo, pull_number: prNumber });
-          const headSha = pr.data.head.sha;
-          const headBranch = pr.data.head.ref;
-          const headRepoId = pr.data.head.repo.id;
-
-          const runs = await github.paginate(github.rest.actions.listWorkflowRunsForRepo, {
-            owner, repo, per_page: 100
-          });
-
-          const relevant = [];
-            const map = new Map();
-            for (const r of runs) {
-              const assoc = (r.pull_requests||[]).some(p => p.number === prNumber)
-                || r.head_sha === headSha
-                || (r.head_branch === headBranch && r.head_repository?.id === headRepoId);
-              if (assoc && !map.has(r.id)) { map.set(r.id, r); relevant.push(r); }
-            }
-
-          let deleted = 0;
-          for (const run of relevant) {
-            const arts = await github.paginate(github.rest.actions.listWorkflowRunArtifacts, {
-              owner, repo, run_id: run.id, per_page: 100
+            const { owner, repo } = context.repo;
+            const prNumber = context.payload.pull_request.number;
+            
+            // Get all artifacts
+            const artifacts = await github.rest.actions.listArtifactsForRepo({
+              owner,
+              repo,
+              per_page: 100
             });
-            for (const a of arts) {
-              if (a.expired) continue;
+            
+            // Filter artifacts that contain the PR number
+            const prArtifacts = artifacts.data.artifacts.filter(artifact => 
+              artifact.name.includes(`PR-${prNumber}-`)
+            );
+            
+            console.log(`Found ${prArtifacts.length} artifacts for PR #${prNumber}`);
+            
+            // Delete each artifact
+            for (const artifact of prArtifacts) {
               try {
-                await github.rest.actions.deleteArtifact({ owner, repo, artifact_id: a.id });
-                console.log(`Deleted ${a.name}`);
-                deleted++;
-              } catch(e){ console.log(`Failed ${a.name}: ${e.message}`); }
+                await github.rest.actions.deleteArtifact({
+                  owner,
+                  repo,
+                  artifact_id: artifact.id
+                });
+                console.log(`Deleted artifact: ${artifact.name}`);
+              } catch (error) {
+                console.error(`Failed to delete artifact ${artifact.name}:`, error.message);
+              }
             }
-          }
-          console.log(`Total deleted: ${deleted}`);
+            
+            console.log(`Cleanup completed for PR #${prNumber}`);
 
     - name: Strike out previews
       uses: actions/github-script@v7
@@ -60,21 +57,47 @@ runs:
           const releaseMarker = '${{ inputs.release-marker }}';
           const pr = await github.rest.pulls.get({ owner, repo, pull_number: prNumber });
           let body = pr.data.body || '';
-          if (!body.includes(releaseMarker)) { console.log('Marker missing'); return; }
 
-          const lines = body.split(/\r?\n/);
-          const idx = lines.findIndex(l => l.includes(releaseMarker));
-          if (idx === -1) return;
-          let changed = false;
-          for (let i = idx + 1; i < lines.length; i++) {
-            const raw = lines[i];
-            if (/~~\s*👉\s*Preview\s+\d+~~\s*\(removed\)/.test(raw)) continue;
-            let m = raw.match(/^👉 \[Preview (\d+)\]\([^)]+\)/) || raw.match(/^👉 Preview (\d+)/);
-            if (m) {
-              lines[i] = `~~👉 Preview ${m[1]}~~ (removed)`;
-              changed = true;
-            }
+          if (!body.includes(releaseMarker)) {
+            console.log('No release marker found.');
+            return;
           }
-          if (!changed) { console.log('No changes'); return; }
-          await github.rest.pulls.update({ owner, repo, pull_number: prNumber, body: lines.join('\n') });
-          console.log('Previews struck out.');
+          const lines = body.split(/\r?\n/);
+          let inRelease = false;
+          let doneMarking = false;
+          const previewRegex = /^👉 \[Preview \d+\]/;
+          for (let i = 0; i < lines.length; i++) {
+            const raw = lines[i];
+            const trimmed = raw.trim();
+            if (!inRelease && raw.includes(releaseMarker)) {
+              inRelease = true;
+              continue; // keep marker unchanged
+            }
+            if (inRelease) {
+              // End release section when first non-preview, non-empty line appears
+              if (trimmed !== '' && !previewRegex.test(trimmed)) {
+                inRelease = false;
+                doneMarking = true;
+              } else if (previewRegex.test(trimmed)) {
+                // Strike through preview line if not already marked and remove link
+                let noLink = raw.replace(/\[Preview (\d+)\]\([^)]+\)/, 'Preview $1');
+                // Nur markieren wenn noch nicht entfernt
+                if (!raw.includes('~~') && !raw.toLowerCase().includes('(removed)')) {
+                  lines[i] = `~~${noLink}~~ (removed)`;
+                  console.log(`Marked & link disabled: ${raw}`);
+                }
+              } else {
+                // Leave empty lines inside preview list unchanged
+              }
+            }
+            if (doneMarking) break; // stop after end of section
+          }
+          const newBody = lines.join('\n');
+          if (newBody === body) {
+            console.log('No changes to body.');
+            return;
+          }
+          await github.rest.pulls.update({ owner, repo, pull_number: prNumber, body: newBody });
+          console.log('Preview lines struck through.');
+
+        
