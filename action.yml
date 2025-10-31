@@ -58,46 +58,46 @@ runs:
           const pr = await github.rest.pulls.get({ owner, repo, pull_number: prNumber });
           let body = pr.data.body || '';
 
-          if (!body.includes(releaseMarker)) {
-            console.log('No release marker found.');
-            return;
-          }
-          const lines = body.split(/\r?\n/);
-          let inRelease = false;
-          let doneMarking = false;
-          const previewRegex = /^👉 \[Preview \d+\]/;
-          for (let i = 0; i < lines.length; i++) {
-            const raw = lines[i];
-            const trimmed = raw.trim();
-            if (!inRelease && raw.includes(releaseMarker)) {
-              inRelease = true;
-              continue; // keep marker unchanged
+            if (!body.includes(releaseMarker)) {
+              console.log('No release marker found.');
+              return;
             }
-            if (inRelease) {
-              // End release section when first non-preview, non-empty line appears
-              if (trimmed !== '' && !previewRegex.test(trimmed)) {
-                inRelease = false;
-                doneMarking = true;
-              } else if (previewRegex.test(trimmed)) {
-                // Strike through preview line if not already marked and remove link
-                let noLink = raw.replace(/\[Preview (\d+)\]\([^)]+\)/, 'Preview $1');
-                // Nur markieren wenn noch nicht entfernt
-                if (!raw.includes('~~') && !raw.toLowerCase().includes('(removed)')) {
-                  lines[i] = `~~${noLink}~~ (removed)`;
-                  console.log(`Marked & link disabled: ${raw}`);
-                }
-              } else {
-                // Leave empty lines inside preview list unchanged
+
+            const lines = body.split(/\r?\n/);
+            const markerIndex = lines.findIndex(l => l.includes(releaseMarker));
+            if (markerIndex === -1) {
+              console.log('Marker index not found.');
+              return;
+            }
+
+            let changed = false;
+
+            for (let i = markerIndex + 1; i < lines.length; i++) {
+              const raw = lines[i];
+
+              // Skip previews already removed
+              if (/~~\s*👉\s*Preview\s+\d+~~\s*\(removed\)/.test(raw)) {
+                continue;
+              }
+
+              // Match lines with link: 👉 [Preview N](...)
+              let m = raw.match(/^👉 \[Preview (\d+)\]\([^)]+\)/);
+              if (m) {
+                const num = m[1];
+                lines[i] = `~~👉 Preview ${num}~~ (removed)`;
+                console.log(`Removed preview with link: ${raw}`);
+                changed = true;
+                continue;
               }
             }
-            if (doneMarking) break; // stop after end of section
-          }
-          const newBody = lines.join('\n');
-          if (newBody === body) {
-            console.log('No changes to body.');
-            return;
-          }
-          await github.rest.pulls.update({ owner, repo, pull_number: prNumber, body: newBody });
-          console.log('Preview lines struck through.');
+
+            if (!changed) {
+              console.log('No preview lines changed.');
+              return;
+            }
+
+            const newBody = lines.join('\n');
+            await github.rest.pulls.update({ owner, repo, pull_number: prNumber, body: newBody });
+            console.log('All preview lines struck through.');
 
         
